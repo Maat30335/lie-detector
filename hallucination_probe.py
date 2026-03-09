@@ -119,7 +119,7 @@ def extract_activations(
         for layer in range(n_layers):
             hook_name = f"blocks.{layer}.hook_resid_post"
             # cache[hook_name] shape: (1, seq_len, d_model)
-            act = cache[hook_name][0, seq_len - 1, :]  # final token
+            act = cache[hook_name][seq_len - 1, :]  # final token
             all_activations[idx, layer, :] = act.float().cpu()
 
         # Free cache memory
