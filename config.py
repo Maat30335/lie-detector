@@ -13,7 +13,7 @@ OBSERVER_MODEL: str = "meta-llama/Llama-3.1-8B"
 
 # ── Device / dtype ────────────────────────────────────────────
 DEVICE: str = "cuda" if torch.cuda.is_available() else "cpu"
-DTYPE: torch.dtype = torch.float16 if DEVICE == "cuda" else torch.float32
+DTYPE: torch.dtype = torch.bfloat16 if DEVICE == "cuda" else torch.float32
 
 # ── Paths ─────────────────────────────────────────────────────
 PROJECT_ROOT: Path = Path(__file__).resolve().parent
@@ -23,5 +23,5 @@ OUTPUT_DIR: Path = PROJECT_ROOT / "output"
 # ── Experiment hyper-parameters ───────────────────────────────
 N_FOLDS: int = 5
 SEED: int = 42
-MAX_SEQ_LEN: int = 1024
+MAX_SEQ_LEN: int = 4096
 REGULARISATION_C: float = 1.0  # inverse regularisation strength for LogisticRegression

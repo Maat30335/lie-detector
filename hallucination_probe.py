@@ -58,7 +58,7 @@ def load_dataset(data_path: Path) -> tuple[list[str], np.ndarray]:
             if rec.get("conclusion") is None:
                 continue
             # Concatenate article + summary as the observer input
-            text = rec["article"].strip() + " " + rec["llama_summary"].strip()
+            text = "[ARTICLE] " + rec["article"].strip() + " [SUMMARY]" + rec["llama_summary"].strip()
             texts.append(text)
             # conclusion == True means faithful (0), False means hallucinated (1)
             labels.append(0 if rec["conclusion"] is True else 1)
@@ -85,10 +85,7 @@ def extract_activations(
     from every layer.
 
     Returns:
-        activations: Tensor of shape (N, L, D)
-            N = number of examples
-            L = number of layers
-            D = model hidden dimension
+        activations: Tensor of shape (num_examples, num_layers, d_model)
     """
     n_layers = model.cfg.n_layers
     d_model = model.cfg.d_model
@@ -115,6 +112,7 @@ def extract_activations(
             _, cache = model.run_with_cache(
                 tokens,
                 names_filter=lambda name: name.endswith("hook_resid_post"),
+                remove_batch_dim=True
             )
 
         # Extract the activation at the final token from each layer
@@ -126,8 +124,6 @@ def extract_activations(
 
         # Free cache memory
         del cache
-        if device == "cuda":
-            torch.cuda.empty_cache()
 
     return all_activations
 
