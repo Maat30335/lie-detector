@@ -24,4 +24,4 @@ OUTPUT_DIR: Path = PROJECT_ROOT / "output"
 N_FOLDS: int = 5
 SEED: int = 42
 MAX_SEQ_LEN: int = 4096
-REGULARISATION_C: float = 1.0  # inverse regularisation strength for LogisticRegression
+REGULARISATION_C_VALUES: list[float] = [1, 1e-1, 1e-2, 1e-3, 1e-4]  # grid of inverse regularisation strengths

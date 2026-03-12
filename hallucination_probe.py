@@ -136,13 +136,14 @@ def run_layer_sweep(
     labels: np.ndarray,
     n_folds: int,
     seed: int,
-    reg_C: float,
+    reg_C_values: list[float],
 ) -> list[dict]:
     """
-    For each layer, run stratified k-fold CV with logistic regression.
+    For each layer, grid-search over regularisation constants with
+    stratified k-fold CV.
 
-    Returns a list of dicts, one per layer, containing per-fold and
-    mean metrics.
+    Returns a list of dicts (one per layer) containing the best C, its
+    per-fold metrics, mean metrics, and a summary of all C values tried.
     """
     n_layers = activations.shape[1]
     skf = StratifiedKFold(n_splits=n_folds, shuffle=True, random_state=seed)
@@ -150,50 +151,81 @@ def run_layer_sweep(
 
     for layer in range(n_layers):
         X = activations[:, layer, :].numpy()  # (N, D)
-        fold_metrics: list[dict] = []
+        best_auroc = -1.0
+        best_c_result: dict | None = None
+        all_c_results: list[dict] = []
 
-        for fold_idx, (train_idx, test_idx) in enumerate(skf.split(X, labels)):
-            X_train, X_test = X[train_idx], X[test_idx]
-            y_train, y_test = labels[train_idx], labels[test_idx]
+        for C_val in reg_C_values:
+            fold_metrics: list[dict] = []
 
-            clf = LogisticRegression(
-                C=reg_C,
-                max_iter=1000,
-                solver="lbfgs",
-                random_state=seed,
-            )
-            clf.fit(X_train, y_train)
+            for fold_idx, (train_idx, test_idx) in enumerate(skf.split(X, labels)):
+                X_train, X_test = X[train_idx], X[test_idx]
+                y_train, y_test = labels[train_idx], labels[test_idx]
 
-            y_pred = clf.predict(X_test)
-            y_prob = clf.predict_proba(X_test)
+                clf = LogisticRegression(
+                    C=C_val,
+                    max_iter=1000,
+                    solver="lbfgs",
+                    random_state=seed,
+                )
+                clf.fit(X_train, y_train)
 
-            acc = accuracy_score(y_test, y_pred)
-            f1 = f1_score(y_test, y_pred, zero_division=0.0)
+                y_pred = clf.predict(X_test)
+                y_prob = clf.predict_proba(X_test)
 
-            # AUROC — handle edge cases where only one class is in the fold
-            try:
-                auroc = roc_auc_score(y_test, y_prob[:, 1])
-            except ValueError:
-                auroc = float("nan")
+                acc = accuracy_score(y_test, y_pred)
+                f1 = f1_score(y_test, y_pred, zero_division=0.0)
 
-            fold_metrics.append({"acc": acc, "f1": f1, "auroc": auroc})
+                # AUROC — handle edge cases where only one class is in the fold
+                try:
+                    auroc = roc_auc_score(y_test, y_prob[:, 1])
+                except ValueError:
+                    auroc = float("nan")
 
-        # Aggregate across folds
-        accs = [m["acc"] for m in fold_metrics]
-        f1s = [m["f1"] for m in fold_metrics]
-        aurocs = [m["auroc"] for m in fold_metrics if not np.isnan(m["auroc"])]
+                fold_metrics.append({"acc": acc, "f1": f1, "auroc": auroc})
+
+            # Aggregate across folds for this C value
+            accs = [m["acc"] for m in fold_metrics]
+            f1s = [m["f1"] for m in fold_metrics]
+            aurocs = [m["auroc"] for m in fold_metrics if not np.isnan(m["auroc"])]
+
+            c_result = {
+                "C": C_val,
+                "acc_mean": float(np.mean(accs)),
+                "acc_std": float(np.std(accs)),
+                "f1_mean": float(np.mean(f1s)),
+                "f1_std": float(np.std(f1s)),
+                "auroc_mean": float(np.mean(aurocs)) if aurocs else float("nan"),
+                "auroc_std": float(np.std(aurocs)) if aurocs else float("nan"),
+                "folds": fold_metrics,
+            }
+            all_c_results.append(c_result)
+
+            mean_auroc = c_result["auroc_mean"]
+            if not np.isnan(mean_auroc) and mean_auroc > best_auroc:
+                best_auroc = mean_auroc
+                best_c_result = c_result
+
+        # Fall back to accuracy if all AUROCs are NaN
+        if best_c_result is None:
+            best_c_result = max(all_c_results, key=lambda r: r["acc_mean"])
 
         layer_result = {
             "layer": layer,
-            "acc_mean": float(np.mean(accs)),
-            "acc_std": float(np.std(accs)),
-            "f1_mean": float(np.mean(f1s)),
-            "f1_std": float(np.std(f1s)),
-            "auroc_mean": float(np.mean(aurocs)) if aurocs else float("nan"),
-            "auroc_std": float(np.std(aurocs)) if aurocs else float("nan"),
-            "folds": fold_metrics,
+            "best_C": best_c_result["C"],
+            "acc_mean": best_c_result["acc_mean"],
+            "acc_std": best_c_result["acc_std"],
+            "f1_mean": best_c_result["f1_mean"],
+            "f1_std": best_c_result["f1_std"],
+            "auroc_mean": best_c_result["auroc_mean"],
+            "auroc_std": best_c_result["auroc_std"],
+            "folds": best_c_result["folds"],
+            "all_C_results": all_c_results,
         }
         results.append(layer_result)
+
+        print(f"  Layer {layer:>3d}  best C={best_c_result['C']:<8g}  "
+              f"AUROC={best_c_result['auroc_mean']:.4f}")
 
     return results
 
@@ -211,13 +243,13 @@ def select_best_layer(results: list[dict]) -> int:
 # Reporting
 # ──────────────────────────────────────────────────────────────
 def print_results_table(results: list[dict], best_layer: int):
-    """Pretty-print per-layer metrics."""
-    header = f"{'Layer':>6}  {'Acc':>12}  {'F1':>12}  {'AUROC':>12}"
-    print("\n" + "=" * 52)
+    """Pretty-print per-layer metrics (showing best C per layer)."""
+    header = f"{'Layer':>6}  {'Best C':>8}  {'Acc':>12}  {'F1':>12}  {'AUROC':>12}"
+    print("\n" + "=" * 66)
     print("LAYER SWEEP RESULTS")
-    print("=" * 52)
+    print("=" * 66)
     print(header)
-    print("-" * 52)
+    print("-" * 66)
 
     for r in results:
         marker = " ★" if r["layer"] == best_layer else ""
@@ -228,13 +260,15 @@ def print_results_table(results: list[dict], best_layer: int):
         )
         print(
             f"{r['layer']:>6}  "
+            f"{r['best_C']:<8g}  "
             f"{r['acc_mean']:.3f}±{r['acc_std']:.3f}  "
             f"{r['f1_mean']:.3f}±{r['f1_std']:.3f}  "
             f"{auroc_str}{marker}"
         )
 
-    print("=" * 52)
-    print(f"Best layer: {best_layer} (highest mean AUROC)")
+    print("=" * 66)
+    best_C = results[best_layer]["best_C"]
+    print(f"Best layer: {best_layer} (C={best_C:g}, highest mean AUROC)")
 
 
 def save_results(
@@ -259,16 +293,16 @@ def save_best_probe(
     activations: torch.Tensor,
     labels: np.ndarray,
     best_layer: int,
-    reg_C: float,
+    best_C: float,
     seed: int,
     output_dir: Path,
 ):
     """
-    Re-train on the full dataset at the best layer and save
-    the probe weights and bias for later use.
+    Re-train on the full dataset at the best layer with its best C
+    and save the probe weights and bias for later use.
     """
     X = activations[:, best_layer, :].numpy()
-    clf = LogisticRegression(C=reg_C, max_iter=1000, solver="lbfgs", random_state=seed)
+    clf = LogisticRegression(C=best_C, max_iter=1000, solver="lbfgs", random_state=seed)
     clf.fit(X, labels)
 
     probe_path = output_dir / "probe_weights.npz"
@@ -277,6 +311,7 @@ def save_best_probe(
         weights=clf.coef_[0],
         bias=clf.intercept_[0],
         best_layer=best_layer,
+        best_C=best_C,
     )
     print(f"Probe weights saved to {probe_path}")
 
@@ -317,8 +352,9 @@ def main():
         help=f"Number of CV folds (default: {cfg.N_FOLDS})",
     )
     parser.add_argument(
-        "--reg-C", type=float, default=cfg.REGULARISATION_C,
-        help=f"Logistic regression regularisation C (default: {cfg.REGULARISATION_C})",
+        "--reg-C-values", type=float, nargs="+",
+        default=cfg.REGULARISATION_C_VALUES,
+        help=f"Regularisation C values to grid-search (default: {cfg.REGULARISATION_C_VALUES})",
     )
     args = parser.parse_args()
 
@@ -330,6 +366,7 @@ def main():
     print(f"Device         : {args.device}")
     print(f"Max seq len    : {args.max_seq_len}")
     print(f"CV folds       : {args.n_folds}")
+    print(f"Reg C values   : {args.reg_C_values}")
     print(f"Seed           : {args.seed}")
     print()
 
@@ -361,14 +398,15 @@ def main():
         torch.cuda.empty_cache()
 
     # ── 4. Layer sweep ────────────────────────────────────────
-    print(f"\n[probe] Running {args.n_folds}-fold CV across all layers …")
-    results = run_layer_sweep(activations, labels, args.n_folds, args.seed, args.reg_C)
+    print(f"\n[probe] Running {args.n_folds}-fold CV × {len(args.reg_C_values)} C values across all layers …")
+    results = run_layer_sweep(activations, labels, args.n_folds, args.seed, args.reg_C_values)
     best_layer = select_best_layer(results)
+    best_C = results[best_layer]["best_C"]
 
     # ── 5. Report ─────────────────────────────────────────────
     print_results_table(results, best_layer)
     save_results(results, best_layer, args.model, output_dir)
-    save_best_probe(activations, labels, best_layer, args.reg_C, args.seed, output_dir)
+    save_best_probe(activations, labels, best_layer, best_C, args.seed, output_dir)
 
     elapsed = time.time() - t0
     print(f"\nTotal time: {elapsed / 60:.1f} minutes")
