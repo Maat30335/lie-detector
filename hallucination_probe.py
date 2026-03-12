@@ -10,7 +10,7 @@ Implements the methodology from the paper excerpt:
 3. Extract the activation at the **final token** from every layer.
 4. For each layer, train a logistic-regression probe with stratified
    5-fold cross-validation and report Accuracy, F1, and AUROC.
-5. Select the best layer (highest mean AUROC) and save results.
+5. Select the best layer (highest mean F1) and save results.
 
 Usage:
     python hallucination_probe.py                          # defaults from config.py
@@ -151,7 +151,7 @@ def run_layer_sweep(
 
     for layer in range(n_layers):
         X = activations[:, layer, :].numpy()  # (N, D)
-        best_auroc = -1.0
+        best_f1 = -1.0
         best_c_result: dict | None = None
         all_c_results: list[dict] = []
 
@@ -201,12 +201,12 @@ def run_layer_sweep(
             }
             all_c_results.append(c_result)
 
-            mean_auroc = c_result["auroc_mean"]
-            if not np.isnan(mean_auroc) and mean_auroc > best_auroc:
-                best_auroc = mean_auroc
+            mean_f1 = c_result["f1_mean"]
+            if mean_f1 > best_f1:
+                best_f1 = mean_f1
                 best_c_result = c_result
 
-        # Fall back to accuracy if all AUROCs are NaN
+        # Fall back to accuracy if all F1s are zero
         if best_c_result is None:
             best_c_result = max(all_c_results, key=lambda r: r["acc_mean"])
 
@@ -225,18 +225,14 @@ def run_layer_sweep(
         results.append(layer_result)
 
         print(f"  Layer {layer:>3d}  best C={best_c_result['C']:<8g}  "
-              f"AUROC={best_c_result['auroc_mean']:.4f}")
+              f"F1={best_c_result['f1_mean']:.4f}")
 
     return results
 
 
 def select_best_layer(results: list[dict]) -> int:
-    """Return the layer index with the highest mean AUROC."""
-    valid = [(r["layer"], r["auroc_mean"]) for r in results if not np.isnan(r["auroc_mean"])]
-    if not valid:
-        print("[warning] No valid AUROC values — falling back to accuracy")
-        return max(results, key=lambda r: r["acc_mean"])["layer"]
-    return max(valid, key=lambda x: x[1])[0]
+    """Return the layer index with the highest mean F1."""
+    return max(results, key=lambda r: r["f1_mean"])["layer"]
 
 
 # ──────────────────────────────────────────────────────────────
@@ -268,7 +264,7 @@ def print_results_table(results: list[dict], best_layer: int):
 
     print("=" * 66)
     best_C = results[best_layer]["best_C"]
-    print(f"Best layer: {best_layer} (C={best_C:g}, highest mean AUROC)")
+    print(f"Best layer: {best_layer} (C={best_C:g}, highest mean F1)")
 
 
 def save_results(
