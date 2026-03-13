@@ -58,7 +58,7 @@ def load_dataset(data_path: Path) -> tuple[list[str], np.ndarray]:
             if rec.get("conclusion") is None:
                 continue
             # Concatenate article + summary as the observer input
-            text = "[ARTICLE] " + rec["article"].strip() + " [SUMMARY]" + rec["llama_summary"].strip()
+            text = "[ARTICLE] " + rec["article"].strip() + " [SUMMARY] " + rec["llama_summary"].strip()
             texts.append(text)
             # conclusion == True means faithful (0), False means hallucinated (1)
             labels.append(0 if rec["conclusion"] is True else 1)
@@ -111,13 +111,13 @@ def extract_activations(
         with torch.no_grad():
             _, cache = model.run_with_cache(
                 tokens,
-                names_filter=lambda name: name.endswith("hook_resid_post"),
+                names_filter=lambda name: name.endswith("ln1.hook_normalized"),
                 remove_batch_dim=True
             )
 
         # Extract the activation at the final token from each layer
         for layer in range(n_layers):
-            hook_name = f"blocks.{layer}.hook_resid_post"
+            hook_name = f"blocks.{layer}.ln1.hook_normalized"
             # cache[hook_name] shape: (1, seq_len, d_model)
             act = cache[hook_name][seq_len - 1, :]  # final token
             all_activations[idx, layer, :] = act.float().cpu()
