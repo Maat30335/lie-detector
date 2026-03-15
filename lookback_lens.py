@@ -92,12 +92,13 @@ def extract_lookback_ratios(
 
     1. Tokenise article and summary separately, concatenate tokens,
        and record the boundary (n_context = len(article_tokens)).
-    2. Run the concatenated sequence through the model, caching
-       attention patterns from every layer.
-    3. For each summary token position t, layer l, head h:
+    2. Run the concatenated sequence through the model with hooks
+       on each layer's attention pattern (no caching).
+    3. Each hook computes, for every summary token position t and head h:
          A_context = mean(attn[t, :n_context])
          A_new     = mean(attn[t, n_context:t])   (preceding summary tokens)
          LR        = A_context / (A_context + A_new)
+       and accumulates the result into a shared tensor.
     4. Average LR across summary token positions → shape (L*H,).
 
     Returns:
@@ -136,59 +137,56 @@ def extract_lookback_ratios(
         if n_context >= seq_len:
             continue
 
-        # ── Forward pass — cache attention patterns ──────────
-        with torch.no_grad():
-            _, cache = model.run_with_cache(
-                tokens,
-                names_filter=lambda name: name.endswith("attn.hook_pattern"),
-                remove_batch_dim=True,
-            )
-
-        # ── Compute lookback ratios ──────────────────────────
-        # For each layer, attn pattern shape: (n_heads, seq_len, seq_len)
-        # attn[h, t, s] = attention weight from position t to position s.
-        #
-        # We compute ratios for each summary token position
-        # t in [n_context, seq_len - 1].
-
+        # ── Prepare accumulator for lookback ratios ──────────
+        # Each hook writes to its own layer row; no post-hoc
+        # iteration over the cache is needed.
         layer_head_ratios = torch.zeros(
             (n_layers, n_heads), dtype=torch.float32
         )
-
         n_summary_tokens = seq_len - n_context
 
-        for layer in range(n_layers):
-            hook_name = f"blocks.{layer}.attn.hook_pattern"
-            attn = cache[hook_name]  # (n_heads, seq_len, seq_len)
+        def make_lookback_hook(layer_idx, n_ctx, sl, n_h):
+            """Return a hook fn that computes lookback ratios for one layer."""
+            def hook_fn(attn_pattern, hook):
+                # attn_pattern shape: (batch, n_heads, seq_len, seq_len)
+                attn = attn_pattern[0]  # (n_heads, seq_len, seq_len)
+                for t in range(n_ctx, sl):
+                    a_context = attn[:, t, :n_ctx].mean(dim=1)  # (n_heads,)
+                    if t > n_ctx:
+                        a_new = attn[:, t, n_ctx:t].mean(dim=1)  # (n_heads,)
+                    else:
+                        a_new = torch.zeros(n_h, device=attn.device)
+                    denom = a_context + a_new
+                    lr = torch.where(
+                        denom > 0,
+                        a_context / denom,
+                        torch.ones_like(denom) * 0.5,
+                    )
+                    layer_head_ratios[layer_idx] += lr.cpu()
+                return attn_pattern
+            return hook_fn
 
-            for t in range(n_context, seq_len):
-                # Attention from summary token t → context tokens
-                a_context = attn[:, t, :n_context].mean(dim=1)  # (n_heads,)
+        # Build list of (hook_name, hook_fn) pairs
+        hook_fns = [
+            (
+                f"blocks.{layer}.attn.hook_pattern",
+                make_lookback_hook(layer, n_context, seq_len, n_heads),
+            )
+            for layer in range(n_layers)
+        ]
 
-                # Attention from summary token t → preceding summary tokens
-                if t > n_context:
-                    a_new = attn[:, t, n_context:t].mean(dim=1)  # (n_heads,)
-                else:
-                    # First summary token: no preceding summary tokens
-                    a_new = torch.zeros(n_heads, device=attn.device)
-
-                denom = a_context + a_new
-                # Avoid division by zero
-                lr = torch.where(
-                    denom > 0,
-                    a_context / denom,
-                    torch.ones_like(denom) * 0.5,
-                )
-                layer_head_ratios[layer] += lr.cpu()
+        # ── Forward pass — hooks compute ratios on the fly ───
+        with torch.no_grad():
+            model.run_with_hooks(
+                tokens,
+                fwd_hooks=hook_fns,
+            )
 
         # Average across summary tokens
         layer_head_ratios /= n_summary_tokens
 
         # Flatten to (L*H,) and store
         all_features[idx] = layer_head_ratios.flatten().numpy()
-
-        # Free cache memory
-        del cache
 
     return all_features
 
